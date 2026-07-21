@@ -1,7 +1,8 @@
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { ConnectButton } from "./ConnectButton";
-import { useState } from "react";
-import { useAccount, useReadContract } from "wagmi";
+import { useState, useEffect, useMemo } from "react";
+import { useAccount, useReadContract, usePublicClient } from "wagmi";
+import { formatAmountCompact } from "../lib/format";
 import { activeChain } from "../lib/wagmi";
 import { factoryAbi } from "../lib/contracts";
 import { useFactoryAddress } from "../hooks/useFactoryAddress";
@@ -24,6 +25,92 @@ export function Layout() {
     functionName: "getTokenPage",
     args: [0n, 1000n],
   });
+
+  const publicClient = usePublicClient();
+  const [matchDetails, setMatchDetails] = useState<Record<string, { marketCapUsd: number; liquidityUsd: number }>>({});
+
+  const matches = useMemo(() => {
+    if (!searchQuery.trim() || !allTokensPage) return [];
+    const q = searchQuery.trim().toLowerCase();
+    return (allTokensPage as any[])
+      .filter(
+        (t: any) =>
+          t.symbol.toLowerCase().includes(q) ||
+          t.name.toLowerCase().includes(q) ||
+          t.token.toLowerCase() === q
+      )
+      .slice(0, 5); // limit to top 5 results for clean dropdown
+  }, [searchQuery, allTokensPage]);
+
+  useEffect(() => {
+    if (matches.length === 0 || !publicClient) return;
+
+    let isCurrent = true;
+
+    const fetchDetails = async () => {
+      try {
+        const calls: any[] = [];
+        const abi = [
+          { name: "virtualTokenReserve", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+          { name: "tokensSold", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+          { name: "virtualEthReserve", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+          { name: "realEthReserve", type: "function", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+        ];
+
+        matches.forEach((t) => {
+          const address = t.token;
+          calls.push(
+            { address, abi, functionName: "virtualTokenReserve" },
+            { address, abi, functionName: "tokensSold" },
+            { address, abi, functionName: "virtualEthReserve" },
+            { address, abi, functionName: "realEthReserve" }
+          );
+        });
+
+        const results = await publicClient.multicall({ contracts: calls });
+
+        if (!isCurrent) return;
+
+        const newDetails: Record<string, { marketCapUsd: number; liquidityUsd: number }> = {};
+        const ethToUsd = 3000;
+
+        matches.forEach((t, idx) => {
+          const rBase = idx * 4;
+          const virtualTokenReserve = results[rBase]?.result as bigint || 0n;
+          const tokensSold = results[rBase + 1]?.result as bigint || 0n;
+          const virtualEthReserve = results[rBase + 2]?.result as bigint || 0n;
+          const realEthReserve = results[rBase + 3]?.result as bigint || 0n;
+
+          const tokenReserve = virtualTokenReserve - tokensSold;
+          const ethReserve = virtualEthReserve + realEthReserve;
+
+          const priceInEth = tokenReserve > 0n ? Number(ethReserve) / Number(tokenReserve) : 0;
+          const marketCapUsd = 1_000_000_000 * priceInEth * ethToUsd;
+
+          const realEth = Number(realEthReserve) / 1e18;
+          const virtualEth = Number(virtualEthReserve) / 1e18;
+          const liquidityUsd = realEth > 0 
+            ? realEth * 2 * ethToUsd 
+            : virtualEth * 2 * ethToUsd;
+
+          newDetails[t.token.toLowerCase()] = {
+            marketCapUsd,
+            liquidityUsd,
+          };
+        });
+
+        setMatchDetails((prev) => ({ ...prev, ...newDetails }));
+      } catch (err) {
+        console.error("Failed to batch read match token reserves:", err);
+      }
+    };
+
+    fetchDetails();
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [matches, publicClient]);
 
   return (
     <div className="min-h-screen flex flex-col bg-black text-zinc-300">
@@ -194,6 +281,48 @@ export function Layout() {
                 <span className="absolute right-3 top-2 text-[10px] text-zinc-600 font-mono-data">
                   ⏎
                 </span>
+              )}
+
+              {/* Autocomplete Search Dropdown */}
+              {matches.length > 0 && (
+                <div className="absolute left-0 right-0 top-full mt-2 bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden z-50 animate-fade-in divide-y divide-zinc-900">
+                  {matches.map((t: any) => {
+                    const details = matchDetails[t.token.toLowerCase()];
+                    return (
+                      <button
+                        key={t.token}
+                        onClick={() => {
+                          navigate(`/token/${t.token}`);
+                          setSearchQuery("");
+                        }}
+                        className="w-full flex items-center justify-between p-3 hover:bg-zinc-900/60 transition-colors text-left cursor-pointer animate-fade-in"
+                      >
+                        <div className="min-w-0 flex flex-col">
+                          <span className="font-semibold text-white text-xs truncate">
+                            {t.name}
+                          </span>
+                          <span className="text-[10px] text-zinc-500 font-mono-data">
+                            ${t.symbol}
+                          </span>
+                        </div>
+                        <div className="flex flex-col items-end shrink-0 font-mono-data text-[10px] gap-0.5">
+                          {details ? (
+                            <>
+                              <span className="text-emerald-400 font-semibold">
+                                MCAP: ${formatAmountCompact(details.marketCapUsd)}
+                              </span>
+                              <span className="text-zinc-400">
+                                LIQ: ${formatAmountCompact(details.liquidityUsd)}
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-zinc-600 animate-pulse text-[9px]">Loading...</span>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
               )}
             </div>
 
