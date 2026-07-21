@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Production builds
+dist/
+**/dist/
+
+# Environment variables
+.env
+**/.env
+!.env.example
+
+# Database & cache
+*.sqlite
+*.sqlite-journal
+cache/
+out/
+broadcast/
+
+# System files
+.DS_Store
+Thumbs.db
