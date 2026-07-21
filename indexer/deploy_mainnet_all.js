@@ -65,6 +65,7 @@ function compileSolidity(filename, contractName) {
     },
     settings: {
       optimizer: { enabled: true, runs: 200 },
+      viaIR: true,
       outputSelection: {
         "*": {
           "*": ["abi", "evm.bytecode"],
