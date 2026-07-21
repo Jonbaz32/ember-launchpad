@@ -395,8 +395,8 @@ export function Dice() {
             <div className="relative">
               <input
                 type="number"
-                step="0.001"
-                min="0.001"
+                step="0.0001"
+                min="0.0006"
                 max="400"
                 value={wagerEth}
                 onChange={(e) => setWagerEth(e.target.value)}
@@ -410,7 +410,7 @@ export function Dice() {
 
             {/* Quick Wager Presets */}
             <div className="grid grid-cols-4 gap-2 mt-1 font-mono-data text-xs">
-              {["0.001", "0.01", "0.1", "1.0", "5.0", "10.0", "50.0", "400.0"].map((preset) => (
+              {["0.0006", "0.01", "0.1", "1.0", "5.0", "10.0", "50.0", "400.0"].map((preset) => (
                 <button
                   key={preset}
                   onClick={() => setWagerEth(preset)}
