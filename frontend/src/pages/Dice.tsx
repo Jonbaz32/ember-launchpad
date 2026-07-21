@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
-import { useAccount, useBalance, useSendTransaction } from "wagmi";
-import { formatEther, parseEther } from "viem";
-import { PROTOCOL_FEE_RECIPIENT } from "../lib/contracts";
+import { useAccount, useBalance, useWriteContract, usePublicClient } from "wagmi";
+import { formatEther, parseEther, decodeEventLog } from "viem";
+import { DICE_ADDRESS, emberDiceAbi } from "../lib/contracts";
 
 interface GameRoll {
   id: string;
@@ -21,8 +21,12 @@ interface GameRoll {
 
 export function Dice() {
   const { address, isConnected } = useAccount();
-  const { data: balanceData } = useBalance({ address });
-  const { sendTransactionAsync } = useSendTransaction();
+  const { data: balanceData, refetch: refetchUserBalance } = useBalance({ address });
+  const { data: contractBalanceData, refetch: refetchBankroll } = useBalance({ address: DICE_ADDRESS });
+  const { writeContractAsync } = useWriteContract();
+  const publicClient = usePublicClient();
+
+  const bankrollEth = contractBalanceData ? parseFloat(formatEther(contractBalanceData.value)) : 0;
 
   // Game state
   const [wagerEth, setWagerEth] = useState<string>("0.05");
@@ -36,15 +40,7 @@ export function Dice() {
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [showFairnessModal, setShowFairnessModal] = useState<boolean>(false);
 
-  // Balance deduction & tracking state
-  const [balanceOffset, setBalanceOffset] = useState<number>(0);
-  const initialBalance = balanceData ? parseFloat(formatEther(balanceData.value)) : 1.0;
-  const currentBalance = Math.max(0, initialBalance + balanceOffset);
-
-
-  // House Bankroll Profitability Safeguard ($10,000 net house profit required before standard winning payouts unlock)
-  const PROFIT_THRESHOLD_USD = 10000.00;
-  const [houseNetProfitUsd, setHouseNetProfitUsd] = useState<number>(315.00);
+  const currentBalance = balanceData ? parseFloat(formatEther(balanceData.value)) : 0.0;
 
   // Provably fair state
   const [clientSeed, setClientSeed] = useState<string>(
@@ -167,32 +163,6 @@ export function Dice() {
     }
   }
 
-  function generateControlledRoll(shouldWin: boolean, mode: "under" | "over", target: number): number {
-    let min: number;
-    let max: number;
-
-    if (shouldWin) {
-      if (mode === "under") {
-        min = 0.00;
-        max = Math.max(0.00, target - 0.01);
-      } else {
-        min = Math.min(99.99, target + 0.01);
-        max = 99.99;
-      }
-    } else {
-      if (mode === "under") {
-        min = target;
-        max = 99.99;
-      } else {
-        min = 0.00;
-        max = target;
-      }
-    }
-
-    const raw = min + Math.random() * (max - min);
-    return Number(raw.toFixed(2));
-  }
-
   // Pre-fill initial mock history
   useEffect(() => {
     const mockPlayers = ["0x71a...f82", "0x3b9...e10", "0x992...c41", "0xf02...a98", "0x118...7b3"];
@@ -233,109 +203,125 @@ export function Dice() {
     }
 
     try {
-      // Execute 90% protocol fee recipient + 10% bankroll vault split in wallet transactions
-      if (isConnected && sendTransactionAsync) {
-        setIsRolling(true);
-        const protocolAmount = parseEther((wagerNum * 0.90).toFixed(6));
-        const hash = await sendTransactionAsync({
-          to: PROTOCOL_FEE_RECIPIENT,
-          value: protocolAmount,
-        });
-        console.log("90% Protocol fee sent to protocol recipient:", hash);
-      } else {
-        setIsRolling(true);
+      setIsRolling(true);
+      setLastResult(null);
+      setLastWin(null);
+
+      playRollSound();
+
+      // Visual roll tumbling effect
+      let tumbleCount = 0;
+      const tumbleInterval = setInterval(() => {
+        setLastResult(Math.floor(Math.random() * 9900) / 100);
+        tumbleCount++;
+        if (tumbleCount > 10) {
+          clearInterval(tumbleInterval);
+        }
+      }, 50);
+
+      // Call roll on EmberDice contract
+      // Target is rollTarget scaled by 100: e.g. 50.00 is passed as 5000
+      const targetArg = BigInt(Math.floor(rollTarget * 100));
+      const isUnderArg = rollMode === "under";
+      const wagerWei = parseEther(wagerEth);
+
+      if (!publicClient) {
+        throw new Error("RPC client is not initialized");
       }
-    } catch (err: unknown) {
-      setIsRolling(false);
-      const msg = err instanceof Error ? err.message : "Transaction failed.";
-      setTxError(msg.includes("user rejected") || msg.includes("User rejected") ? "Transaction cancelled in wallet." : msg);
-      return;
-    }
 
-    setLastResult(null);
-    setLastWin(null);
+      const hash = await writeContractAsync({
+        address: DICE_ADDRESS,
+        abi: emberDiceAbi,
+        functionName: "roll",
+        args: [targetArg, isUnderArg],
+        value: wagerWei,
+      });
 
-    // Deduct wager from current balance immediately and persist offset
-    setBalanceOffset((prev) => prev - wagerNum);
+      console.log("Roll transaction sent:", hash);
 
-    playRollSound();
-
-    // Visual roll tumbling effect
-    let tumbleCount = 0;
-    const tumbleInterval = setInterval(() => {
-      setLastResult(Math.floor(Math.random() * 9900) / 100);
-      tumbleCount++;
-      if (tumbleCount > 10) {
-        clearInterval(tumbleInterval);
-      }
-    }, 50);
-
-
-    setTimeout(() => {
+      // Wait for transaction receipt
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      
       clearInterval(tumbleInterval);
 
-      // Controlled outcome calculation (win probability with 1.00% house edge)
-      const chance = rollMode === "under" ? rollTarget : 99.99 - rollTarget;
-      const fairWinProb = (chance / 100) * 0.99;
-      const fairWin = Math.random() < fairWinProb;
+      // Parse the event log
+      let rollResultVal: number | null = null;
+      let wonVal: boolean | null = null;
 
-      // Platform Bankroll Safeguard: House maintains edge until $10,000 net profit threshold is reached
-      const thresholdReached = houseNetProfitUsd >= PROFIT_THRESHOLD_USD;
-      const wagerUsdEst = wagerNum * 2500; // 1 ETH ~ $2500 USD
-      const isMicroWager = wagerUsdEst < 2.00 || wagerNum < 0.0008;
-
-      // House controls win unlock: micro-wagers can win to demonstrate mechanics, major wagers lose until threshold reached
-      const shouldWin = fairWin && (thresholdReached || isMicroWager);
-
-      // Generate controlled roll so visual number always matches win/loss outcome perfectly
-      const roll = generateControlledRoll(shouldWin, rollMode, rollTarget);
-      const won = rollMode === "under" ? roll < rollTarget : roll > rollTarget;
-
-      setLastResult(roll);
-      setLastWin(won);
-      setIsRolling(false);
-
-      if (won) {
-        playWinSound();
-        setHouseNetProfitUsd((prev) => Math.max(0, prev - potentialProfit * 2500));
-        // Credit win payout to balance
-        setBalanceOffset((prev) => prev + potentialWin);
-      } else {
-        playLossSound();
-        setHouseNetProfitUsd((prev) => prev + wagerNum * 2500);
+      for (const log of receipt.logs) {
+        try {
+          const decoded = decodeEventLog({
+            abi: emberDiceAbi,
+            eventName: "DiceRolled",
+            topics: log.topics,
+            data: log.data,
+          }) as any;
+          
+          if (decoded.args) {
+            rollResultVal = Number(decoded.args.rollResult) / 100;
+            wonVal = decoded.args.won;
+            break;
+          }
+        } catch (e) {
+          // ignore other logs
+        }
       }
 
-      // Update history & stats
-      const profit = won ? potentialProfit : -wagerNum;
-      const playerAddr = address ? `${address.slice(0, 5)}...${address.slice(-3)}` : "0xYou...Me";
+      if (rollResultVal !== null && wonVal !== null) {
+        setLastResult(rollResultVal);
+        setLastWin(wonVal);
+        
+        if (wonVal) {
+          playWinSound();
+        } else {
+          playLossSound();
+        }
 
-      const newRoll: GameRoll = {
-        id: `roll-${Date.now()}`,
-        player: playerAddr,
-        wager: wagerNum,
-        rollTarget,
-        rollMode,
-        rollResult: roll,
-        won,
-        multiplier,
-        payout: won ? potentialWin : 0,
-        profit,
-        timestamp: Date.now(),
-        clientSeed,
-        nonce,
-      };
+        // Add to history
+        const profit = wonVal ? potentialProfit : -wagerNum;
+        const playerAddr = address ? `${address.slice(0, 5)}...${address.slice(-3)}` : "0xYou...Me";
 
-      setHistory((prev) => [newRoll, ...prev.slice(0, 25)]);
-      setNonce((n) => n + 1);
+        const newRoll: GameRoll = {
+          id: hash,
+          player: playerAddr,
+          wager: wagerNum,
+          rollTarget,
+          rollMode,
+          rollResult: rollResultVal,
+          won: wonVal,
+          multiplier,
+          payout: wonVal ? potentialWin : 0,
+          profit,
+          timestamp: Date.now(),
+          clientSeed,
+          nonce,
+        };
 
-      setStats((prev) => ({
-        rollsCount: prev.rollsCount + 1,
-        winsCount: prev.winsCount + (won ? 1 : 0),
-        totalWagered: prev.totalWagered + wagerNum,
-        totalProfit: prev.totalProfit + profit,
-        streak: won ? (prev.streak >= 0 ? prev.streak + 1 : 1) : prev.streak <= 0 ? prev.streak - 1 : -1,
-      }));
-    }, 700);
+        setHistory((prev) => [newRoll, ...prev.slice(0, 25)]);
+        setNonce((prev) => prev + 1);
+        
+        // Update stats
+        setStats((prev) => ({
+          rollsCount: prev.rollsCount + 1,
+          winsCount: prev.winsCount + (wonVal ? 1 : 0),
+          totalWagered: prev.totalWagered + wagerNum,
+          totalProfit: prev.totalProfit + profit,
+          streak: wonVal ? (prev.streak >= 0 ? prev.streak + 1 : 1) : prev.streak <= 0 ? prev.streak - 1 : -1,
+        }));
+
+        // Refetch balances
+        refetchUserBalance();
+        refetchBankroll();
+      } else {
+        throw new Error("Could not parse DiceRolled event log");
+      }
+    } catch (err: any) {
+      console.error("Roll failed:", err);
+      const msg = err.message || "Transaction failed.";
+      setTxError(msg.includes("user rejected") || msg.includes("User rejected") ? "Transaction cancelled in wallet." : msg);
+    } finally {
+      setIsRolling(false);
+    }
   }
 
   return (
@@ -386,18 +372,28 @@ export function Dice() {
             </span>
           </div>
 
+          {/* House Bankroll Bar */}
+          <div className="flex justify-between items-center text-xs font-mono-data bg-zinc-900/60 border border-zinc-800/80 rounded-2xl p-3.5">
+            <span className="text-zinc-400">
+              House Bankroll Balance:
+            </span>
+            <span className="font-bold text-emerald-400">
+              {`${bankrollEth.toFixed(4)} ETH`}
+            </span>
+          </div>
+
           {/* Wager Amount Input */}
           <div className="flex flex-col gap-2">
             <label className="text-xs font-semibold text-zinc-300 flex justify-between">
               <span>BET AMOUNT (ETH)</span>
-              <span className="text-zinc-500 font-mono-data">Max: 400 ETH ($1,000,000)</span>
+              <span className="text-zinc-500 font-mono-data">Max: 0.5000 ETH</span>
             </label>
             <div className="relative">
               <input
                 type="number"
                 step="0.0001"
-                min="0.0006"
-                max="400"
+                min="0.001"
+                max="0.5"
                 value={wagerEth}
                 onChange={(e) => setWagerEth(e.target.value)}
                 placeholder="0.05"
@@ -410,13 +406,13 @@ export function Dice() {
 
             {/* Quick Wager Presets */}
             <div className="grid grid-cols-4 gap-2 mt-1 font-mono-data text-xs">
-              {["0.0006", "0.01", "0.1", "1.0", "5.0", "10.0", "50.0", "400.0"].map((preset) => (
+              {["0.001", "0.005", "0.01", "0.05", "0.1", "0.25", "0.4", "0.5"].map((preset) => (
                 <button
                   key={preset}
                   onClick={() => setWagerEth(preset)}
                   className="py-1.5 rounded-xl border border-zinc-800 bg-zinc-900/80 text-zinc-300 hover:border-amber-500 hover:text-amber-400 transition-all cursor-pointer text-center"
                 >
-                  {preset === "400.0" ? "400 (MAX)" : preset}
+                  {preset === "0.5" ? "0.5 (MAX)" : preset}
                 </button>
               ))}
             </div>
