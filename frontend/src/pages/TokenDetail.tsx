@@ -1,17 +1,16 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
-import { parseEther, formatEther, zeroAddress } from "viem";
+import { parseEther, formatEther, zeroAddress, createPublicClient, http, decodeEventLog } from "viem";
 import {
   useAccount,
   useReadContract,
   useWriteContract,
   useWaitForTransactionReceipt,
   usePublicClient,
-  useSendTransaction,
   useSwitchChain,
 } from "wagmi";
 import { useTokenState } from "../hooks/useTokenState";
-import { launchTokenAbi, factoryAbi } from "../lib/contracts";
+import { launchTokenAbi, factoryAbi, L1_BRIDGE_ADDRESS, L2_BRIDGE_ADDRESS, bridgeGatewayAbi } from "../lib/contracts";
 import { formatEth, formatTokenAmount, shortAddress, formatAmountCompact } from "../lib/format";
 import { AntiRugBadge } from "../components/AntiRugBadge";
 import { RugDetector } from "../components/RugDetector";
@@ -54,6 +53,13 @@ export function TokenDetail() {
   const [timeframe, setTimeframe] = useState<"1s" | "1m" | "5m" | "15m" | "1h" | "4h" | "1D">("15m");
   const [topHolders, setTopHolders] = useState<{ address: string; balance: bigint; percentage: number }[]>([]);
   const [holdersLoading, setHoldersLoading] = useState(false);
+  const [chartType, setChartType] = useState<"native" | "dexscreener">("native");
+
+  useEffect(() => {
+    if (state?.graduated) {
+      setChartType("dexscreener");
+    }
+  }, [state?.graduated]);
 
   const { data: myBalance, refetch: refetchBalance } = useReadContract({
     address: tokenAddress,
@@ -279,6 +285,14 @@ export function TokenDetail() {
             Chain ID: {activeChain.id}
           </span>
           <span>Addr: {shortAddress(tokenAddress)}</span>
+          <a
+            href={`https://dexscreener.com/robinhood/${tokenAddress}`}
+            target="_blank"
+            rel="noreferrer"
+            className="bg-yellow-500/10 text-yellow-500 hover:bg-yellow-500/20 border border-yellow-500/20 px-2 py-0.5 rounded text-[10px] font-bold transition-all cursor-pointer"
+          >
+            📊 DexScreener Link
+          </a>
         </div>
       </div>
 
@@ -378,21 +392,68 @@ export function TokenDetail() {
               <span className="font-semibold text-zinc-100 flex items-center gap-1.5 text-xs">
                 📈 CHART VIEW
               </span>
-              <div className="flex items-center bg-zinc-900 rounded-lg p-0.5 border border-zinc-800 font-mono-data text-xs scale-90">
-                {(["1s", "1m", "5m", "15m", "1h", "4h", "1D"] as const).map((tf) => (
+              
+              <div className="flex items-center gap-2">
+                {/* Chart Type Toggle */}
+                <div className="flex items-center bg-zinc-900 rounded-lg p-0.5 border border-zinc-800 font-mono-data text-xs scale-90">
                   <button
-                    key={tf}
-                    onClick={() => setTimeframe(tf)}
+                    onClick={() => setChartType("native")}
                     className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
-                      timeframe === tf ? "bg-yellow-500 text-black font-bold" : "text-zinc-500 hover:text-white"
+                      chartType === "native" ? "bg-yellow-500 text-black font-bold" : "text-zinc-500 hover:text-white"
                     }`}
                   >
-                    {tf}
+                    Native Chart
                   </button>
-                ))}
+                  <button
+                    onClick={() => setChartType("dexscreener")}
+                    className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
+                      chartType === "dexscreener" ? "bg-yellow-500 text-black font-bold" : "text-zinc-500 hover:text-white"
+                    }`}
+                  >
+                    DexScreener Embed
+                  </button>
+                </div>
+
+                {/* Timeframe selector (only show for native chart) */}
+                {chartType === "native" && (
+                  <div className="flex items-center bg-zinc-900 rounded-lg p-0.5 border border-zinc-800 font-mono-data text-xs scale-90">
+                    {(["1s", "1m", "5m", "15m", "1h", "4h", "1D"] as const).map((tf) => (
+                      <button
+                        key={tf}
+                        onClick={() => setTimeframe(tf)}
+                        className={`px-2 py-1 rounded-md transition-colors cursor-pointer ${
+                          timeframe === tf ? "bg-yellow-500 text-black font-bold" : "text-zinc-500 hover:text-white"
+                        }`}
+                      >
+                        {tf}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
-            <CandleChart trades={trades} timeframe={timeframe} currentPrice={priceInEth} />
+
+            {chartType === "dexscreener" ? (
+              <div className="w-full h-[500px] rounded-xl overflow-hidden border border-zinc-900 bg-zinc-950">
+                {state.graduated ? (
+                  <iframe
+                    src={`https://dexscreener.com/robinhood/${tokenAddress}?embed=1&theme=dark&trades=0&info=0`}
+                    className="w-full h-full border-none"
+                    title="DexScreener Chart"
+                  />
+                ) : (
+                  <div className="w-full h-full flex flex-col items-center justify-center text-zinc-500 text-xs text-center p-6 gap-2 bg-zinc-950/40">
+                    <span className="text-xl">⚠️</span>
+                    <span className="font-bold text-white">Token Not Graduated Yet</span>
+                    <span className="text-[10px] text-zinc-500 max-w-sm leading-relaxed">
+                      DexScreener charts only activate once a token graduates from the bonding curve and deposits official Uniswap pool liquidity. Please use the "Native Chart" tab to view real-time bonding curve trading activity.
+                    </span>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <CandleChart trades={trades} timeframe={timeframe} currentPrice={priceInEth} />
+            )}
           </div>
 
           {/* Activity Analytics Card */}
@@ -1264,6 +1325,7 @@ function UniswapSwapWidget({ tokenAddress, tokenSymbol, dexRouterAddress, refetc
   
   const { address: wallet, isConnected, chain: currentChain } = useAccount();
   const { switchChainAsync } = useSwitchChain();
+  const publicClient = usePublicClient();
 
   const amountInParsed = useMemo(() => {
     try {
@@ -1532,28 +1594,101 @@ function UniswapSwapWidget({ tokenAddress, tokenSymbol, dexRouterAddress, refetc
   const [bridgeProgress, setBridgeProgress] = useState(0);
   const [bridgeTxHash, setBridgeTxHash] = useState("");
 
-  const { sendTransactionAsync } = useSendTransaction();
+  const { writeContractAsync: bridgeWrite } = useWriteContract();
 
-  // Simulated cross-chain relayer progress
+  // Watch L1 deposit tx completion and poll L2 bridge contract status
   useEffect(() => {
     let interval: any;
-    if (bridgeState === "relaying") {
-      interval = setInterval(() => {
-        setBridgeProgress((prev) => {
-          if (prev >= 100) {
-            clearInterval(interval);
-            setBridgeState("completed");
-            return 100;
+    let checkCount = 0;
+    
+    if (bridgeState === "relaying" && bridgeTxHash && publicClient) {
+      setBridgeProgress(10);
+      
+      const trackRelay = async () => {
+        try {
+          const receipt = await publicClient.waitForTransactionReceipt({ hash: bridgeTxHash as `0x${string}` });
+          
+          let nonce: bigint | null = null;
+          for (const log of receipt.logs) {
+            try {
+              const decoded = decodeEventLog({
+                abi: bridgeGatewayAbi,
+                eventName: "BridgeDeposited",
+                topics: log.topics,
+                data: log.data,
+              }) as any;
+              nonce = decoded.args.nonce;
+              break;
+            } catch (e) {
+              // ignore
+            }
           }
-          return prev + 10;
-        });
-      }, 1000);
+          
+          if (nonce === null) {
+            console.warn("Could not find BridgeDeposited log in L1 receipt");
+            setBridgeState("idle");
+            return;
+          }
+          
+          console.log("Extracted L1 deposit nonce:", nonce.toString());
+          setBridgeProgress(35);
+
+          const l2PublicClientInstance = createPublicClient({
+            chain: activeChain,
+            transport: http(activeChain.rpcUrls.default.http[0]),
+          });
+          
+          // Poll L2 BridgeGateway contract to check processedDeposits
+          interval = setInterval(async () => {
+            try {
+              checkCount++;
+              const isProcessed = await l2PublicClientInstance.readContract({
+                address: L2_BRIDGE_ADDRESS,
+                abi: bridgeGatewayAbi,
+                functionName: "processedDeposits",
+                args: [BigInt(bridgeSource.id), nonce],
+              });
+              
+              if (isProcessed) {
+                clearInterval(interval);
+                setBridgeProgress(100);
+                setBridgeState("completed");
+              } else {
+                // Fake progression up to 90% while waiting for relayer
+                setBridgeProgress((prev) => Math.min(90, prev + 5));
+              }
+            } catch (err) {
+              console.error("Error reading L2 bridge status:", err);
+            }
+            
+            // Timeout after 3 minutes (22 checks)
+            if (checkCount > 22) {
+              clearInterval(interval);
+              console.error("Bridge relay timeout");
+              setBridgeState("idle");
+            }
+          }, 8000);
+
+        } catch (err) {
+          console.error("Error waiting for L1 transaction:", err);
+          setBridgeState("idle");
+        }
+      };
+
+      trackRelay();
     }
-    return () => clearInterval(interval);
-  }, [bridgeState]);
+    
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [bridgeState, bridgeTxHash, bridgeSource.id, publicClient]);
 
   async function executeBridge() {
     if (!wallet) return;
+    if (L1_BRIDGE_ADDRESS === zeroAddress || L2_BRIDGE_ADDRESS === zeroAddress) {
+      alert("Bridge contracts are not configured yet. Run node deploy_bridge.js in the indexer first!");
+      return;
+    }
     try {
       setBridgeState("switching");
       if (currentChain?.id !== bridgeSource.id) {
@@ -1563,8 +1698,11 @@ function UniswapSwapWidget({ tokenAddress, tokenSymbol, dexRouterAddress, refetc
       setBridgeState("depositing");
       const parsedAmount = parseEther(bridgeAmount);
       
-      const hash = await sendTransactionAsync({
-        to: "0xB10cda8DDe5C0c64B7c88deB10cB05D2e2CDe2F0",
+      const hash = await bridgeWrite({
+        address: L1_BRIDGE_ADDRESS,
+        abi: bridgeGatewayAbi,
+        functionName: "deposit",
+        args: [wallet, BigInt(activeChain.id)],
         value: parsedAmount,
       });
 
@@ -1573,7 +1711,7 @@ function UniswapSwapWidget({ tokenAddress, tokenSymbol, dexRouterAddress, refetc
       
       setTimeout(() => {
         setBridgeState("relaying");
-      }, 2000);
+      }, 1000);
 
     } catch (err) {
       console.error("Bridge failed:", err);
@@ -1594,6 +1732,7 @@ function UniswapSwapWidget({ tokenAddress, tokenSymbol, dexRouterAddress, refetc
       console.error("Complete bridge switch failed:", err);
     }
   }
+
 
   return (
     <div className="flex flex-col gap-4 font-mono-data">

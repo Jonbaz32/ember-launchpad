@@ -241,11 +241,11 @@ export function Layout() {
       {/* Rug Detector Modal when searching contract address */}
       {auditModalAddr && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in overflow-y-auto"
           onClick={() => setAuditModalAddr(null)}
         >
           <div
-            className="w-full max-w-xl"
+            className="w-full max-w-3xl my-8"
             onClick={(e) => e.stopPropagation()}
           >
             <RugDetector targetAddress={auditModalAddr} onClose={() => setAuditModalAddr(null)} />
