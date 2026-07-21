@@ -15,7 +15,7 @@ export const DICE_VAULT_ADDRESS = (import.meta.env.VITE_DICE_VAULT_ADDRESS ||
   "0x415e16Ad0Cd00485a7479B0a31b862c5ba27222A") as `0x${string}`;
 
 export const DICE_ADDRESS = (import.meta.env.VITE_DICE_ADDRESS ||
-  "0x0000000000000000000000000000000000000000") as `0x${string}`;
+  "0xab2f20e4ff0346114a81f1593aae7657a17fd799") as `0x${string}`;
 
 export const L1_BRIDGE_ADDRESS = (import.meta.env.VITE_L1_BRIDGE_ADDRESS ||
   "0x0000000000000000000000000000000000000000") as `0x${string}`;
