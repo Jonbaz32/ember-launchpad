@@ -1,4 +1,4 @@
-import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 import { ConnectButton } from "./ConnectButton";
 import { useState, useEffect, useMemo } from "react";
 import { useAccount, useReadContract, usePublicClient } from "wagmi";
@@ -14,9 +14,15 @@ export function Layout() {
   const [auditModalAddr, setAuditModalAddr] = useState<string | null>(null);
   const { isConnected, chain } = useAccount();
   const [showSocials, setShowSocials] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const navigate = useNavigate();
+  const { pathname } = useLocation();
 
   const isWrongChain = isConnected && chain && chain.id !== activeChain.id;
+
+  useEffect(() => {
+    setIsMobileMenuOpen(false);
+  }, [pathname]);
 
   // Read all tokens from factory to enable name/symbol searching
   const { data: allTokensPage } = useReadContract({
@@ -327,9 +333,180 @@ export function Layout() {
             </div>
 
             <ConnectButton />
+
+            {/* Mobile Menu Toggle Button */}
+            <button
+              onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+              className="flex md:hidden p-2 rounded-lg border border-zinc-850 bg-zinc-950 text-zinc-400 hover:text-white hover:border-zinc-700 transition-all cursor-pointer"
+              aria-label="Toggle Menu"
+            >
+              {isMobileMenuOpen ? (
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              ) : (
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+              )}
+            </button>
           </div>
         </div>
       </header>
+
+      {/* Mobile Drawer Overlay */}
+      {isMobileMenuOpen && (
+        <div className="md:hidden border-b border-zinc-900 bg-black/95 backdrop-blur py-4 px-4 flex flex-col gap-4 z-30 font-medium">
+          {/* Mobile Search Bar */}
+          <div className="relative w-full sm:hidden mb-2">
+            <input
+              type="text"
+              placeholder="Search contract address..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && searchQuery.trim()) {
+                  const q = searchQuery.trim();
+                  if (/^0x[a-fA-F0-9]{40}$/.test(q)) {
+                    setAuditModalAddr(q);
+                    setSearchQuery("");
+                  } else if (allTokensPage) {
+                    const match = (allTokensPage as any[]).find(
+                      (t: any) =>
+                        t.symbol.toLowerCase() === q.toLowerCase() ||
+                        t.name.toLowerCase().includes(q.toLowerCase())
+                    );
+                    if (match) {
+                      navigate(`/token/${match.token}`);
+                      setSearchQuery("");
+                    }
+                  }
+                }
+              }}
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-full pl-4 pr-16 py-2 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-emerald-500 transition-all font-mono-data"
+            />
+            {/^0x[a-fA-F0-9]{40}$/.test(searchQuery.trim()) ? (
+              <button
+                onClick={() => {
+                  setAuditModalAddr(searchQuery.trim());
+                  setSearchQuery("");
+                }}
+                className="absolute right-1.5 top-1.5 font-mono-data text-[10px] font-bold px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 hover:bg-emerald-500/30 transition-all cursor-pointer"
+              >
+                🛡️ Audit
+              </button>
+            ) : (
+              <span className="absolute right-3 top-2.5 text-[10px] text-zinc-600 font-mono-data">
+                ⏎
+              </span>
+            )}
+
+            {/* Mobile Dropdown Search matches */}
+            {matches.length > 0 && (
+              <div className="absolute left-0 right-0 top-full mt-2 bg-zinc-950 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden z-50 divide-y divide-zinc-900">
+                {matches.map((t: any) => {
+                  const details = matchDetails[t.token.toLowerCase()];
+                  return (
+                    <button
+                      key={t.token}
+                      onClick={() => {
+                        navigate(`/token/${t.token}`);
+                        setSearchQuery("");
+                      }}
+                      className="w-full flex items-center justify-between p-3 hover:bg-zinc-900/60 transition-colors text-left cursor-pointer"
+                    >
+                      <div className="min-w-0 flex flex-col">
+                        <span className="font-semibold text-white text-xs truncate">
+                          {t.name}
+                        </span>
+                        <span className="text-[10px] text-zinc-500 font-mono-data">
+                          ${t.symbol}
+                        </span>
+                      </div>
+                      <div className="flex flex-col items-end shrink-0 font-mono-data text-[10px] gap-0.5">
+                        {details ? (
+                          <>
+                            <span className="text-emerald-400 font-semibold">
+                              MCAP: ${formatAmountCompact(details.marketCapUsd)}
+                            </span>
+                            <span className="text-zinc-400">
+                              LIQ: ${formatAmountCompact(details.liquidityUsd)}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-zinc-600 animate-pulse text-[9px]">Loading...</span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <NavLink
+            to="/"
+            end
+            className={({ isActive }) =>
+              isActive
+                ? "text-yellow-500 font-semibold text-sm py-1 border-b border-zinc-900"
+                : "text-zinc-400 hover:text-white transition-colors text-sm py-1 border-b border-zinc-900"
+            }
+          >
+            Discover
+          </NavLink>
+          <NavLink
+            to="/swap"
+            className={({ isActive }) =>
+              isActive
+                ? "text-yellow-500 font-semibold text-sm py-1 border-b border-zinc-900"
+                : "text-zinc-400 hover:text-white transition-colors text-sm py-1 border-b border-zinc-900"
+            }
+          >
+            Swap
+          </NavLink>
+          <NavLink
+            to="/bridge"
+            className={({ isActive }) =>
+              isActive
+                ? "text-emerald-400 font-semibold text-sm py-1 border-b border-zinc-900"
+                : "text-zinc-400 hover:text-emerald-300 transition-colors text-sm py-1 border-b border-zinc-900"
+            }
+          >
+            Bridge (DeBank)
+          </NavLink>
+          <NavLink
+            to="/create"
+            className={({ isActive }) =>
+              isActive
+                ? "text-yellow-500 font-semibold text-sm py-1 border-b border-zinc-900"
+                : "text-zinc-400 hover:text-white transition-colors text-sm py-1 border-b border-zinc-900"
+            }
+          >
+            Launch Token
+          </NavLink>
+          <NavLink
+            to="/dice"
+            className={({ isActive }) =>
+              isActive
+                ? "text-amber-400 font-semibold text-sm py-1 border-b border-zinc-900"
+                : "text-zinc-400 hover:text-amber-300 transition-colors text-sm py-1 border-b border-zinc-900"
+            }
+          >
+            🎲 Dice Game (HOT)
+          </NavLink>
+          <NavLink
+            to="/portfolio"
+            className={({ isActive }) =>
+              isActive
+                ? "text-yellow-500 font-semibold text-sm py-1"
+                : "text-zinc-400 hover:text-white transition-colors text-sm py-1"
+            }
+          >
+            Portfolio
+          </NavLink>
+        </div>
+      )}
 
       {/* Network notice banner below header */}
       <div className="bg-zinc-950/80 border-b border-zinc-900 py-1.5 text-[11px] text-center text-zinc-500 px-4">
