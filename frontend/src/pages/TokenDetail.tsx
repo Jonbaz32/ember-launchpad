@@ -61,6 +61,27 @@ export function TokenDetail() {
     }
   }, [state?.graduated]);
 
+  const [dexStats, setDexStats] = useState<any | null>(null);
+
+  useEffect(() => {
+    if (!tokenAddress) return;
+    const fetchDexStats = async () => {
+      try {
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.pairs && data.pairs.length > 0) {
+            const rhPair = data.pairs.find((p: any) => p.chainId === "robinhood") || data.pairs[0];
+            setDexStats(rhPair);
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to fetch DexScreener stats:", err);
+      }
+    };
+    fetchDexStats();
+  }, [tokenAddress]);
+
   const { data: myBalance, refetch: refetchBalance } = useReadContract({
     address: tokenAddress,
     abi: launchTokenAbi,
@@ -201,19 +222,31 @@ export function TokenDetail() {
   // Reserves calculations
   const tokenReserve = state.virtualTokenReserve - state.tokensSold;
   const ethReserve = state.virtualEthReserve + state.realEthReserve;
-  const priceInEth = tokenReserve > 0n ? Number(ethReserve) / Number(tokenReserve) : 0.000003;
+
+  const priceInEth = dexStats
+    ? Number(dexStats.priceNative)
+    : (tokenReserve > 0n ? Number(ethReserve) / Number(tokenReserve) : 0.000003);
   
   // Market cap (Assuming 1 ETH = $3000 USD)
   const ethToUsd = 3000;
-  const priceInUsd = priceInEth * ethToUsd;
-  const marketCapEth = (Number(state.totalSupply) / 1e18) * priceInEth;
-  const marketCapUsd = marketCapEth * ethToUsd;
-  const fdvUsd = marketCapUsd; // Total supply valuation
+  const priceInUsd = dexStats
+    ? Number(dexStats.priceUsd)
+    : priceInEth * ethToUsd;
+
+  const marketCapUsd = dexStats
+    ? dexStats.marketCap || dexStats.fdv || 0
+    : (Number(state.totalSupply) / 1e18) * priceInEth * ethToUsd;
+
+  const fdvUsd = dexStats
+    ? dexStats.fdv || dexStats.marketCap || 0
+    : marketCapUsd;
 
   // Liquidity (both sides WETH + Token represented in USD)
-  const liquidityUsd = state.realEthReserve > 0n 
-    ? Number(formatEther(state.realEthReserve)) * 2 * ethToUsd 
-    : Number(formatEther(state.virtualEthReserve)) * 2 * ethToUsd;
+  const liquidityUsd = dexStats
+    ? dexStats.liquidity?.usd || 0
+    : (state.realEthReserve > 0n 
+        ? Number(formatEther(state.realEthReserve)) * 2 * ethToUsd 
+        : Number(formatEther(state.virtualEthReserve)) * 2 * ethToUsd);
 
   // --- Dynamic Buys/Sells Statistics ---
   const buysCount = trades.filter(t => t.side === "buy").length;
@@ -242,17 +275,68 @@ export function TokenDetail() {
   const mockSellers = (addressHashNum % 200) + 400;
   const mockTradersTotal = mockBuyers + mockSellers;
 
-  const displayTxns = totalTxns > 0 ? totalTxns : mockTxns;
-  const displayBuys = totalTxns > 0 ? buysCount : mockBuys;
-  const displaySells = totalTxns > 0 ? sellsCount : mockSells;
+  const displayTxns = useMemo(() => {
+    if (dexStats) {
+      return (dexStats.txns?.h24?.buys || 0) + (dexStats.txns?.h24?.sells || 0);
+    }
+    return totalTxns > 0 ? totalTxns : mockTxns;
+  }, [dexStats, totalTxns, mockTxns]);
 
-  const displayVolume = totalVolume > 0 ? totalVolume : mockVolumeTotal;
-  const displayBuyVol = totalVolume > 0 ? buyVolume : mockBuyVol;
-  const displaySellVol = totalVolume > 0 ? sellVolume : mockSellVol;
+  const displayBuys = useMemo(() => {
+    if (dexStats) {
+      return dexStats.txns?.h24?.buys || 0;
+    }
+    return totalTxns > 0 ? buysCount : mockBuys;
+  }, [dexStats, totalTxns, buysCount, mockBuys]);
 
-  const displayTraders = totalTraders > 0 ? totalTraders : mockTradersTotal;
-  const displayBuyers = totalTraders > 0 ? buyersCount : mockBuyers;
-  const displaySellers = totalTraders > 0 ? sellersCount : mockSellers;
+  const displaySells = useMemo(() => {
+    if (dexStats) {
+      return dexStats.txns?.h24?.sells || 0;
+    }
+    return totalTxns > 0 ? sellsCount : mockSells;
+  }, [dexStats, totalTxns, sellsCount, mockSells]);
+
+  const displayVolume = useMemo(() => {
+    if (dexStats) {
+      return dexStats.volume?.h24 || 0;
+    }
+    return totalVolume > 0 ? totalVolume : mockVolumeTotal;
+  }, [dexStats, totalVolume, mockVolumeTotal]);
+
+  const displayBuyVol = useMemo(() => {
+    if (dexStats) {
+      return dexStats.volume?.h24 ? dexStats.volume.h24 * 0.55 : 0;
+    }
+    return totalVolume > 0 ? buyVolume : mockBuyVol;
+  }, [dexStats, totalVolume, buyVolume, mockBuyVol]);
+
+  const displaySellVol = useMemo(() => {
+    if (dexStats) {
+      return dexStats.volume?.h24 ? dexStats.volume.h24 * 0.45 : 0;
+    }
+    return totalVolume > 0 ? sellVolume : mockSellVol;
+  }, [dexStats, totalVolume, sellVolume, mockSellVol]);
+
+  const displayTraders = useMemo(() => {
+    if (dexStats) {
+      return dexStats.traders?.h24 || 0;
+    }
+    return totalTraders > 0 ? totalTraders : mockTradersTotal;
+  }, [dexStats, totalTraders, mockTradersTotal]);
+
+  const displayBuyers = useMemo(() => {
+    if (dexStats) {
+      return dexStats.traders?.h24 ? Math.floor(dexStats.traders.h24 * 0.53) : 0;
+    }
+    return totalTraders > 0 ? buyersCount : mockBuyers;
+  }, [dexStats, totalTraders, buyersCount, mockBuyers]);
+
+  const displaySellers = useMemo(() => {
+    if (dexStats) {
+      return dexStats.traders?.h24 ? Math.floor(dexStats.traders.h24 * 0.47) : 0;
+    }
+    return totalTraders > 0 ? sellersCount : mockSellers;
+  }, [dexStats, totalTraders, sellersCount, mockSellers]);
 
   // Percentage Calculations for bars
   const txnBuyPercent = displayTxns > 0 ? (displayBuys / displayTxns) * 100 : 50;
@@ -260,10 +344,10 @@ export function TokenDetail() {
   const traderBuyPercent = displayTraders > 0 ? (displayBuyers / displayTraders) * 100 : 50;
 
   // Deterministic Mock Price Changes
-  const mockChange5m = (addressHashNum % 10) - 5;
-  const mockChange1h = (addressHashNum % 20) - 8;
-  const mockChange6h = (addressHashNum % 50) - 25;
-  const mockChange24h = (addressHashNum % 100) - 50;
+  const mockChange5m = dexStats ? dexStats.priceChange?.m5 ?? 0 : ((addressHashNum % 10) - 5);
+  const mockChange1h = dexStats ? dexStats.priceChange?.h1 ?? 0 : ((addressHashNum % 20) - 8);
+  const mockChange6h = dexStats ? dexStats.priceChange?.h6 ?? 0 : ((addressHashNum % 50) - 25);
+  const mockChange24h = dexStats ? dexStats.priceChange?.h24 ?? 0 : ((addressHashNum % 100) - 50);
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-4 flex flex-col gap-5 select-none">
@@ -278,7 +362,11 @@ export function TokenDetail() {
           <span className="text-zinc-600">·</span>
           <span>Robinhood</span>
           <span>&gt;</span>
-          <span className="text-pink-500 font-semibold">{state.graduated ? "Uniswap V2" : "Bonding Curve"}</span>
+          <span className="text-pink-500 font-semibold">
+            {dexStats 
+              ? `${dexStats.dexId ? dexStats.dexId.toUpperCase() : "Uniswap"} ${dexStats.labels?.includes("v3") || dexStats.dexId === "uniswap-v3" ? "V3" : "V2"}` 
+              : (state.graduated ? "Uniswap V2" : "Bonding Curve")}
+          </span>
         </div>
         <div className="flex items-center gap-2">
           <span className="bg-zinc-900 px-2 py-0.5 rounded text-[10px] text-zinc-500 border border-zinc-800">

@@ -224,10 +224,34 @@ export function RugDetector({
   const ethToUsd = 3000;
   const addressHashNum = parseInt(targetAddress.slice(2, 6), 16) || 1;
 
+  const [dexScreenerStats, setDexScreenerStats] = useState<any | null>(null);
+
+  useEffect(() => {
+    if (!targetAddress) return;
+    const fetchDexStats = async () => {
+      try {
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${targetAddress}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.pairs && data.pairs.length > 0) {
+            const rhPair = data.pairs.find((p: any) => p.chainId === "robinhood") || data.pairs[0];
+            setDexScreenerStats(rhPair);
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to fetch DexScreener stats:", err);
+      }
+    };
+    fetchDexStats();
+  }, [targetAddress]);
+
   // Use read values if available, else fall back to deterministic mocks
   const isEmberToken = !!totalSupplyData;
   
   const priceInEth = useMemo(() => {
+    if (dexScreenerStats) {
+      return Number(dexScreenerStats.priceNative);
+    }
     if (isEmberToken && virtualTokenReserveData && tokensSoldData && virtualEthReserveData && realEthReserveData) {
       const vReserve = virtualTokenReserveData as bigint;
       const tSold = tokensSoldData as bigint;
@@ -240,22 +264,38 @@ export function RugDetector({
     }
     // Deterministic Mock Price in WETH
     return (addressHashNum % 100) / 10000000 + 0.0000001;
-  }, [isEmberToken, virtualTokenReserveData, tokensSoldData, virtualEthReserveData, realEthReserveData, addressHashNum]);
+  }, [isEmberToken, virtualTokenReserveData, tokensSoldData, virtualEthReserveData, realEthReserveData, addressHashNum, dexScreenerStats]);
 
-  const priceInUsd = priceInEth * ethToUsd;
+  const priceInUsd = useMemo(() => {
+    if (dexScreenerStats) {
+      return Number(dexScreenerStats.priceUsd);
+    }
+    return priceInEth * ethToUsd;
+  }, [dexScreenerStats, priceInEth, ethToUsd]);
 
   const fdvUsd = useMemo(() => {
+    if (dexScreenerStats) {
+      return dexScreenerStats.fdv || dexScreenerStats.marketCap || 0;
+    }
     if (isEmberToken && totalSupplyData) {
       const supply = totalSupplyData as bigint;
       const capEth = (Number(supply) / 1e18) * priceInEth;
       return capEth * ethToUsd;
     }
     return ((addressHashNum % 10) + 1.2) * 1000000;
-  }, [isEmberToken, totalSupplyData, priceInEth, addressHashNum]);
+  }, [isEmberToken, totalSupplyData, priceInEth, addressHashNum, dexScreenerStats]);
 
-  const marketCapUsd = fdvUsd;
+  const marketCapUsd = useMemo(() => {
+    if (dexScreenerStats) {
+      return dexScreenerStats.marketCap || dexScreenerStats.fdv || 0;
+    }
+    return fdvUsd;
+  }, [dexScreenerStats, fdvUsd]);
 
   const liquidityUsd = useMemo(() => {
+    if (dexScreenerStats) {
+      return dexScreenerStats.liquidity?.usd || 0;
+    }
     if (isEmberToken && realEthReserveData && virtualEthReserveData) {
       const rEth = realEthReserveData as bigint;
       const vEth = virtualEthReserveData as bigint;
@@ -264,13 +304,13 @@ export function RugDetector({
         : Number(formatEther(vEth)) * 2 * ethToUsd;
     }
     return ((addressHashNum % 200) + 50) * 1000;
-  }, [isEmberToken, realEthReserveData, virtualEthReserveData, addressHashNum]);
+  }, [isEmberToken, realEthReserveData, virtualEthReserveData, addressHashNum, dexScreenerStats]);
 
   // Price changes (mocked or calculated based on time)
-  const mockChange5m = (addressHashNum % 10) - 5;
-  const mockChange1h = (addressHashNum % 20) - 8;
-  const mockChange6h = (addressHashNum % 50) - 25;
-  const mockChange24h = (addressHashNum % 100) - 50;
+  const mockChange5m = dexScreenerStats ? dexScreenerStats.priceChange?.m5 ?? 0 : (addressHashNum % 10) - 5;
+  const mockChange1h = dexScreenerStats ? dexScreenerStats.priceChange?.h1 ?? 0 : (addressHashNum % 20) - 8;
+  const mockChange6h = dexScreenerStats ? dexScreenerStats.priceChange?.h6 ?? 0 : (addressHashNum % 50) - 25;
+  const mockChange24h = dexScreenerStats ? dexScreenerStats.priceChange?.h24 ?? 0 : (addressHashNum % 100) - 50;
 
   // Ratios Calculations (similar to TokenDetail)
   const buysCount = trades.filter((t) => t.side === "buy").length;
@@ -286,17 +326,68 @@ export function RugDetector({
   const totalTraders = new Set(trades.map((t) => t.trader)).size;
 
   // Fallbacks if no trades
-  const displayTxns = totalTxns > 0 ? totalTxns : (addressHashNum % 500) + 1500;
-  const displayBuys = totalTxns > 0 ? buysCount : (addressHashNum % 300) + 800;
-  const displaySells = totalTxns > 0 ? sellsCount : displayTxns - ((addressHashNum % 300) + 800);
+  const displayTxns = useMemo(() => {
+    if (dexScreenerStats) {
+      return (dexScreenerStats.txns?.h24?.buys || 0) + (dexScreenerStats.txns?.h24?.sells || 0);
+    }
+    return totalTxns > 0 ? totalTxns : (addressHashNum % 500) + 1500;
+  }, [dexScreenerStats, totalTxns, addressHashNum]);
 
-  const displayVolume = totalVolume > 0 ? totalVolume : (addressHashNum % 1000) * 1000 + 400000;
-  const displayBuyVol = totalVolume > 0 ? buyVolume : displayVolume * 0.55;
-  const displaySellVol = totalVolume > 0 ? sellVolume : displayVolume * 0.45;
+  const displayBuys = useMemo(() => {
+    if (dexScreenerStats) {
+      return dexScreenerStats.txns?.h24?.buys || 0;
+    }
+    return totalTxns > 0 ? buysCount : (addressHashNum % 300) + 800;
+  }, [dexScreenerStats, totalTxns, buysCount, addressHashNum]);
 
-  const displayTraders = totalTraders > 0 ? totalTraders : (addressHashNum % 300) + 500;
-  const displayBuyers = totalTraders > 0 ? buyersCount : displayTraders * 0.53;
-  const displaySellers = totalTraders > 0 ? sellersCount : displayTraders * 0.47;
+  const displaySells = useMemo(() => {
+    if (dexScreenerStats) {
+      return dexScreenerStats.txns?.h24?.sells || 0;
+    }
+    return totalTxns > 0 ? sellsCount : displayTxns - ((addressHashNum % 300) + 800);
+  }, [dexScreenerStats, totalTxns, sellsCount, displayTxns, addressHashNum]);
+
+  const displayVolume = useMemo(() => {
+    if (dexScreenerStats) {
+      return dexScreenerStats.volume?.h24 || 0;
+    }
+    return totalVolume > 0 ? totalVolume : (addressHashNum % 1000) * 1000 + 400000;
+  }, [dexScreenerStats, totalVolume, addressHashNum]);
+
+  const displayBuyVol = useMemo(() => {
+    if (dexScreenerStats) {
+      return dexScreenerStats.volume?.h24 ? dexScreenerStats.volume.h24 * 0.55 : 0;
+    }
+    return totalVolume > 0 ? buyVolume : displayVolume * 0.55;
+  }, [dexScreenerStats, totalVolume, buyVolume, displayVolume]);
+
+  const displaySellVol = useMemo(() => {
+    if (dexScreenerStats) {
+      return dexScreenerStats.volume?.h24 ? dexScreenerStats.volume.h24 * 0.45 : 0;
+    }
+    return totalVolume > 0 ? sellVolume : displayVolume * 0.45;
+  }, [dexScreenerStats, totalVolume, sellVolume, displayVolume]);
+
+  const displayTraders = useMemo(() => {
+    if (dexScreenerStats) {
+      return dexScreenerStats.traders?.h24 || 0;
+    }
+    return totalTraders > 0 ? totalTraders : (addressHashNum % 300) + 500;
+  }, [dexScreenerStats, totalTraders, addressHashNum]);
+
+  const displayBuyers = useMemo(() => {
+    if (dexScreenerStats) {
+      return dexScreenerStats.traders?.h24 ? Math.floor(dexScreenerStats.traders.h24 * 0.53) : 0;
+    }
+    return totalTraders > 0 ? buyersCount : displayTraders * 0.53;
+  }, [dexScreenerStats, totalTraders, buyersCount, displayTraders]);
+
+  const displaySellers = useMemo(() => {
+    if (dexScreenerStats) {
+      return dexScreenerStats.traders?.h24 ? Math.floor(dexScreenerStats.traders.h24 * 0.47) : 0;
+    }
+    return totalTraders > 0 ? sellersCount : displayTraders * 0.47;
+  }, [dexScreenerStats, totalTraders, sellersCount, displayTraders]);
 
   const txnBuyPercent = displayTxns > 0 ? (displayBuys / displayTxns) * 100 : 50;
   const volBuyPercent = displayVolume > 0 ? (displayBuyVol / displayVolume) * 100 : 50;
@@ -378,7 +469,11 @@ export function RugDetector({
               <span className="text-zinc-600">·</span>
               <span>Robinhood</span>
               <span>&gt;</span>
-              <span className="text-pink-500 font-semibold">{migratedData ? "Uniswap V2" : "Bonding Curve"}</span>
+              <span className="text-pink-500 font-semibold">
+                {dexScreenerStats 
+                  ? `${dexScreenerStats.dexId ? dexScreenerStats.dexId.toUpperCase() : "Uniswap"} ${dexScreenerStats.labels?.includes("v3") || dexScreenerStats.dexId === "uniswap-v3" ? "V3" : "V2"}` 
+                  : (migratedData ? "Uniswap V2" : "Bonding Curve")}
+              </span>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="bg-zinc-900 px-1.5 py-0.5 rounded text-[10px] text-zinc-500 border border-zinc-800">
