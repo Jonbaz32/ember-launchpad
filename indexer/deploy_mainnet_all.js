@@ -150,8 +150,13 @@ async function main() {
   console.log("==================================================\n");
 
   // Save compiled ABIs
-  fs.writeFileSync(path.resolve("../frontend/src/abi/TokenFactory.json"), JSON.stringify(factoryCompiled.abi, null, 2));
-  fs.writeFileSync(path.resolve("../frontend/src/abi/LaunchToken.sol/LaunchToken.json"), JSON.stringify(vaultCompiled.abi, null, 2));
+  const frontendAbiDir = path.resolve("../frontend/src/abi");
+  if (!fs.existsSync(frontendAbiDir)) fs.mkdirSync(frontendAbiDir, { recursive: true });
+  fs.writeFileSync(path.join(frontendAbiDir, "TokenFactory.json"), JSON.stringify(factoryCompiled.abi, null, 2));
+
+  const diceVaultAbiDir = path.resolve("../frontend/src/abi/EmberDiceVault.sol");
+  if (!fs.existsSync(diceVaultAbiDir)) fs.mkdirSync(diceVaultAbiDir, { recursive: true });
+  fs.writeFileSync(path.join(diceVaultAbiDir, "EmberDiceVault.json"), JSON.stringify(vaultCompiled.abi, null, 2));
 
   // Update frontend/.env
   const frontendEnvPath = path.resolve("../frontend/.env");
