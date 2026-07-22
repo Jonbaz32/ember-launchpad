@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { formatEther, isAddress } from "viem";
 import {
   useAccount,
@@ -33,7 +33,7 @@ export function Portfolio() {
     query: { enabled: !!targetAddress, refetchInterval: 8000 }
   });
 
-  // Fetch all factory tokens
+  // Fetch all factory tokens (as fallback)
   const { data: allTokensPage, isLoading: pageLoading } = useReadContract({
     address: FACTORY_ADDRESS,
     abi: factoryAbi,
@@ -41,12 +41,108 @@ export function Portfolio() {
     args: [0n, 1000n],
   });
 
-  // Construct batch call structures for balanceOf, reserves, and graduation details
+  // Query Blockscout API for all ERC-20 token balances
+  const [blockscoutTokens, setBlockscoutTokens] = useState<any[]>([]);
+  const [bsLoading, setBsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!targetAddress) return;
+    const fetchBS = async () => {
+      setBsLoading(true);
+      try {
+        const res = await fetch(`https://robinhoodchain.blockscout.com/api/v2/addresses/${targetAddress}/tokens`);
+        if (res.ok) {
+          const data = await res.json();
+          const items = (data.items || []).filter(
+            (item: any) =>
+              item.token &&
+              item.token.type === "ERC-20" &&
+              item.value &&
+              BigInt(item.value) > 0n
+          );
+          setBlockscoutTokens(items);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch Blockscout tokens:", err);
+      } finally {
+        setBsLoading(false);
+      }
+    };
+    fetchBS();
+  }, [targetAddress]);
+
+  // Combine Blockscout tokens and Factory tokens (fallback)
+  const detectedTokens = useMemo(() => {
+    const list: { address: `0x${string}`; symbol: string; name: string; decimals: number }[] = [];
+    const seen = new Set<string>();
+
+    blockscoutTokens.forEach((item: any) => {
+      const addr = item.token.address.toLowerCase();
+      if (!seen.has(addr)) {
+        seen.add(addr);
+        list.push({
+          address: item.token.address as `0x${string}`,
+          symbol: item.token.symbol || "UNKNOWN",
+          name: item.token.name || "Unknown Token",
+          decimals: Number(item.token.decimals || 18),
+        });
+      }
+    });
+
+    // Fallback: If Blockscout returned nothing, list all factory-launched tokens
+    if (list.length === 0 && allTokensPage) {
+      (allTokensPage as any[]).forEach((t: any) => {
+        const addr = t.token.toLowerCase();
+        if (!seen.has(addr)) {
+          seen.add(addr);
+          list.push({
+            address: t.token as `0x${string}`,
+            symbol: t.symbol,
+            name: t.name,
+            decimals: 18,
+          });
+        }
+      });
+    }
+
+    return list;
+  }, [blockscoutTokens, allTokensPage]);
+
+  // Query DexScreener for pricing info
+  const [dexPrices, setDexPrices] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    if (detectedTokens.length === 0) return;
+    const fetchPrices = async () => {
+      try {
+        const addrs = detectedTokens.map(t => t.address).join(",");
+        const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${addrs}`);
+        if (res.ok) {
+          const data = await res.json();
+          const prices: Record<string, number> = {};
+          if (data.pairs) {
+            data.pairs.forEach((pair: any) => {
+              const baseAddr = pair.baseToken.address.toLowerCase();
+              if (!prices[baseAddr] || Number(pair.priceUsd) > prices[baseAddr]) {
+                prices[baseAddr] = Number(pair.priceUsd);
+              }
+            });
+          }
+          setDexPrices(prices);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch DexScreener prices for portfolio:", err);
+      }
+    };
+    fetchPrices();
+  }, [detectedTokens]);
+
+  // Construct batch calls for exact block balances and curve reserves
   const factoryCalls = useMemo(() => {
-    if (!allTokensPage || !targetAddress) return [];
+    if (!targetAddress || detectedTokens.length === 0) return [];
     const calls: any[] = [];
-    (allTokensPage as any[]).forEach((t: any) => {
-      const contract = { address: t.token, abi: launchTokenAbi as any } as const;
+    detectedTokens.forEach((t) => {
+      const contract = { address: t.address, abi: launchTokenAbi as any } as const;
       calls.push({ ...contract, functionName: "balanceOf", args: [targetAddress] });
       calls.push({ ...contract, functionName: "virtualTokenReserve" });
       calls.push({ ...contract, functionName: "virtualEthReserve" });
@@ -56,7 +152,7 @@ export function Portfolio() {
       calls.push({ ...contract, functionName: "graduated" });
     });
     return calls;
-  }, [allTokensPage, targetAddress]);
+  }, [detectedTokens, targetAddress]);
 
   const { data: batchData, isLoading: batchLoading } = useReadContracts({
     contracts: factoryCalls,
@@ -65,7 +161,7 @@ export function Portfolio() {
 
   // Compile active holdings with real time price math
   const holdings = useMemo(() => {
-    if (!allTokensPage || !batchData) return [];
+    if (detectedTokens.length === 0 || !batchData) return [];
     const list: {
       address: `0x${string}`;
       name: string;
@@ -81,7 +177,7 @@ export function Portfolio() {
     
     const ethToUsd = 3000; // static ETH valuation rate
 
-    (allTokensPage as any[]).forEach((t: any, idx: number) => {
+    detectedTokens.forEach((t, idx) => {
       const offset = idx * 7;
       
       const balRes = batchData[offset];
@@ -94,26 +190,43 @@ export function Portfolio() {
 
       if (balRes?.status === "success" && (balRes.result as bigint) > 0n) {
         const balance = balRes.result as bigint;
-        const vToken = vTokenRes?.status === "success" ? (vTokenRes.result as bigint) : 1073000000n * 10n ** 18n;
-        const vEth = vEthRes?.status === "success" ? (vEthRes.result as bigint) : 30n * 10n ** 18n;
-        const rEth = rEthRes?.status === "success" ? (rEthRes.result as bigint) : 0n;
-        const sold = soldRes?.status === "success" ? (soldRes.result as bigint) : 0n;
-        const totalSupply = supplyRes?.status === "success" ? (supplyRes.result as bigint) : 1000000000n * 10n ** 18n;
+        
+        let priceInUsd = dexPrices[t.address.toLowerCase()] || 0;
+        let priceInEth = priceInUsd / ethToUsd;
+
+        const isBondingCurve = vTokenRes?.status === "success" && vEthRes?.status === "success";
+
+        // Fallback to bonding curve reserve logic if not indexed on DexScreener
+        if (priceInUsd === 0 && isBondingCurve) {
+          const vToken = vTokenRes.result as bigint;
+          const vEth = vEthRes.result as bigint;
+          const rEth = rEthRes?.status === "success" ? (rEthRes.result as bigint) : 0n;
+          const sold = soldRes?.status === "success" ? (soldRes.result as bigint) : 0n;
+
+          const tokenReserve = vToken - sold;
+          const ethReserve = vEth + rEth;
+          priceInEth = tokenReserve > 0n ? Number(ethReserve) / Number(tokenReserve) : 0.000003;
+          priceInUsd = priceInEth * ethToUsd;
+        }
+
+        // Hardcode helper for standard stables if needed
+        if (priceInUsd === 0) {
+          if (t.symbol.toUpperCase() === "USDC" || t.symbol.toUpperCase() === "USDT") {
+            priceInUsd = 1.0;
+            priceInEth = 1.0 / ethToUsd;
+          }
+        }
+
+        const balanceFloat = Number(balance) / 10 ** t.decimals;
+        const valueUsd = balanceFloat * priceInUsd;
+        const valueEth = valueUsd / ethToUsd;
+
+        const totalSupply = supplyRes?.status === "success" ? (supplyRes.result as bigint) : 0n;
+        const pctOwned = totalSupply > 0n ? (Number(balance * 10000n / totalSupply) / 100) : 0;
         const graduated = gradRes?.status === "success" ? (gradRes.result as boolean) : false;
 
-        // reserves pricing formula
-        const tokenReserve = vToken - sold;
-        const ethReserve = vEth + rEth;
-        const priceInEth = tokenReserve > 0n ? Number(ethReserve) / Number(tokenReserve) : 0.000003;
-        const priceInUsd = priceInEth * ethToUsd;
-
-        const balanceFloat = Number(formatEther(balance));
-        const valueEth = balanceFloat * priceInEth;
-        const valueUsd = valueEth * ethToUsd;
-        const pctOwned = totalSupply > 0n ? (Number(balance * 10000n / totalSupply) / 100) : 0;
-
         list.push({
-          address: t.token,
+          address: t.address,
           name: t.name,
           symbol: t.symbol.toUpperCase(),
           balance,
@@ -128,7 +241,7 @@ export function Portfolio() {
     });
 
     return list;
-  }, [allTokensPage, batchData]);
+  }, [detectedTokens, batchData, dexPrices]);
 
   // Aggregate total net worth
   const totals = useMemo(() => {
@@ -145,7 +258,7 @@ export function Portfolio() {
     };
   }, [ethBalance, holdings]);
 
-  const isLoading = ethLoading || pageLoading || batchLoading;
+  const isLoading = ethLoading || pageLoading || bsLoading || batchLoading;
 
   return (
     <div className="max-w-4xl mx-auto flex flex-col gap-6 select-none font-mono-data">
